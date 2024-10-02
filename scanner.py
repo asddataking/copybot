@@ -1,5 +1,5 @@
 import discord
-import aiohttp  # Import aiohttp for asynchronous HTTP requests
+import aiohttp
 import os
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 HELIUS_API_KEY = os.getenv('HELIUS_API_KEY')
 HELIUS_API_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
 # Define the intents
 intents = discord.Intents.default()
@@ -53,8 +54,6 @@ async def get_dexscreener_token_data(contract_address, chain_id="solana"):
             if order_data and order_data[0].get("status") == "approved":
                 dex_paid = "Yes"
 
-            duplicate_count = await search_similar_tokens(token_name, logo_uri)
-
             return {
                 "base_token": token_name,
                 "symbol": token_symbol,
@@ -63,30 +62,14 @@ async def get_dexscreener_token_data(contract_address, chain_id="solana"):
                 "volume_24h": format_number(token_data.get("volume", {}).get("h24", "N/A")),
                 "market_cap": format_number(token_data.get("fdv", "N/A")),
                 "pair_url": token_data.get("url", "N/A"),
-                "dex_paid": dex_paid,
-                "duplicates": duplicate_count
+                "dex_paid": dex_paid
             }
     except aiohttp.ClientError as e:
         print(f"Error fetching DexScreener API: {e}")
         return None
 
-# Search for tokens with the same name or image using Solscan API
-async def search_similar_tokens(token_name, logo_uri):
-    try:
-        solscan_url = f"https://public-api.solscan.io/token/list?limit=1000&offset=0&search={token_name}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(solscan_url) as response:
-                response.raise_for_status()
-                tokens_list = (await response.json()).get("data", [])
-
-            similar_tokens = [token for token in tokens_list if token.get("icon", "") == logo_uri]
-            return len(similar_tokens)
-    except aiohttp.ClientError as e:
-        print(f"Error searching similar tokens via Solscan: {e}")
-        return 0
-
-# Fetch token holder count and top holders using Helius API
-async def fetch_top_token_holders(token_mint_address):
+# Fetch the total number of token holders using Solana RPC
+async def fetch_token_holder_count(token_mint_address):
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -95,21 +78,19 @@ async def fetch_top_token_holders(token_mint_address):
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(HELIUS_API_URL, json=payload) as response:
+            async with session.post(SOLANA_RPC_URL, json=payload) as response:
                 response.raise_for_status()
-                holders = (await response.json()).get('result', {}).get('value', [])
-
-                if len(holders) >= 2:
-                    top_holder = holders[0]['amount']
-                    second_holder = holders[1]['amount']
-                    return len(holders), top_holder, second_holder
-                else:
-                    return len(holders), None, None
+                accounts_data = await response.json()
+                accounts = accounts_data.get("result", {}).get("value", [])
+                
+                # Return the count of unique token holder accounts
+                return len(accounts)
     except aiohttp.ClientError as e:
-        print(f"Error fetching token holders from Helius: {e}")
-        return None, None, None
+        print(f"Error fetching token largest accounts from Solana RPC: {e}")
+        return 0
 
-def format_token_data_embed(data, contract_address, holder_count, top1_percentage, top2_percentage):
+# Format the data for Discord message with an embed
+def format_token_data_embed(data, contract_address, holder_count):
     embed = discord.Embed(title=f"Token Info for {contract_address}", color=0x00ff00)
     embed.add_field(name="🪙 Token", value=data["base_token"], inline=True)
     embed.add_field(name="💠 Symbol", value=data["symbol"], inline=True)
@@ -120,29 +101,30 @@ def format_token_data_embed(data, contract_address, holder_count, top1_percentag
     embed.add_field(name="🌐 Pair URL", value=data["pair_url"], inline=False)
     embed.add_field(name="✅ Dex Paid?", value=data["dex_paid"], inline=True)
     embed.add_field(name="👥 Token Holders", value=f'{holder_count} wallets', inline=True)
-    embed.add_field(name="🥇 Top Holder %", value=f'{top1_percentage:.2f}%', inline=True)
-    embed.add_field(name="🥈 Second Holder %", value=f'{top2_percentage:.2f}%', inline=True)
-    embed.add_field(name="📝 Duplicate Tokens Found", value=f'{data["duplicates"]}', inline=True)
     return embed
 
+# Command to fetch token status
 @bot.command(name='token')
 async def fetch_token_status(ctx, contract_address: str):
     await ctx.send(f"Fetching token data for contract address: {contract_address}... 🧑‍💻")
 
+    # Fetch DexScreener token data
     token_data = await get_dexscreener_token_data(contract_address)
-    holder_count, top1_amount, top2_amount = await fetch_top_token_holders(contract_address)
 
-    if token_data and holder_count is not None and top1_amount and top2_amount:
-        total_supply = float(top1_amount) + float(top2_amount)
-        top1_percentage = (float(top1_amount) / total_supply) * 100
-        top2_percentage = (float(top2_amount) / total_supply) * 100
-        embed_message = format_token_data_embed(token_data, contract_address, holder_count, top1_percentage, top2_percentage)
+    # Fetch accurate token holder count from Solana RPC
+    holder_count = await fetch_token_holder_count(contract_address)
+
+    if token_data:
+        # Format and send the message with accurate data
+        embed_message = format_token_data_embed(token_data, contract_address, holder_count)
         await ctx.send(embed=embed_message)
     else:
         await ctx.send(f"Error fetching data for contract address: {contract_address} 🛑")
 
 # Start the bot
 bot.run(DISCORD_TOKEN)
+
+
 
 
 
